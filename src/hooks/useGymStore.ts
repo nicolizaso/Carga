@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import Dexie from 'dexie';
 import { db, openDatabase } from '../lib/db';
-import { fetchExercises, missingSources, pickNewExercises } from '../lib/exerciseApi';
+import {
+  CATALOG_MAPPING_VERSION,
+  fetchExercises,
+  missingSources,
+  pickNewExercises,
+  sourceOfExercise,
+} from '../lib/exerciseApi';
 import { calculateWeekTarget } from '../lib/progression';
 import type {
   Exercise,
@@ -19,6 +25,45 @@ export interface PlanCompletion {
   planDayId: number;
   weekIndex: number;
   date: Date;
+}
+
+const CATALOG_MAPPING_VERSION_KEY = 'carga:catalog-mapping-version';
+
+function catalogMappingIsOutdated(): boolean {
+  try {
+    return Number(window.localStorage.getItem(CATALOG_MAPPING_VERSION_KEY)) < CATALOG_MAPPING_VERSION;
+  } catch {
+    return false;
+  }
+}
+
+function markCatalogMappingUpToDate() {
+  try {
+    window.localStorage.setItem(CATALOG_MAPPING_VERSION_KEY, String(CATALOG_MAPPING_VERSION));
+  } catch {
+    // Sin almacenamiento se vuelve a recalcular la próxima vez; no rompe nada.
+  }
+}
+
+/**
+ * Vuelca el catálogo remoto en la base local: suma los ejercicios nuevos y corrige el grupo
+ * muscular y el equipamiento de los que ya estaban (no son editables, sólo las notas lo son).
+ */
+async function syncCatalog(remote: Exercise[]): Promise<void> {
+  const stored = await db.exercises.toArray();
+  const byApiId = new Map(remote.map((exercise) => [exercise.apiId, exercise]));
+
+  await db.transaction('rw', db.exercises, async () => {
+    for (const exercise of stored) {
+      const fresh = exercise.apiId ? byApiId.get(exercise.apiId) : undefined;
+      if (!fresh || typeof exercise.id !== 'number') continue;
+      if (fresh.muscleGroup === exercise.muscleGroup && fresh.equipment === exercise.equipment) continue;
+      await db.exercises.update(exercise.id, { muscleGroup: fresh.muscleGroup, equipment: fresh.equipment });
+    }
+
+    const incoming = pickNewExercises(stored, remote);
+    if (incoming.length > 0) await db.exercises.bulkAdd(incoming);
+  });
 }
 
 const REST_BETWEEN_SETS_KEY = 'carga:rest-between-sets-seconds';
@@ -253,6 +298,7 @@ export const useGymStore = create<GymState>((set, get) => ({
         if (remote.length > 0) {
           await db.exercises.bulkAdd(remote);
           stored = await db.exercises.toArray();
+          markCatalogMappingUpToDate();
         }
       }
 
@@ -268,19 +314,25 @@ export const useGymStore = create<GymState>((set, get) => ({
             : null,
       });
 
-      // Quien ya tenía el catálogo de antes no tiene las fuentes que se sumaron después:
-      // se completan en segundo plano, sin spinner ni error si no responden.
+      // Quien ya tenía el catálogo de antes no tiene las fuentes que se sumaron después, y
+      // si cambiaron las traducciones sus categorías quedaron viejas: se pone al día en
+      // segundo plano, sin spinner ni error si las APIs no responden.
       const missing = catalogWasEmpty ? [] : missingSources(stored);
-      if (missing.length > 0) {
+      const remap = !catalogWasEmpty && stored.some((exercise) => exercise.apiId) && catalogMappingIsOutdated();
+      if (missing.length > 0 || remap) {
         void (async () => {
           try {
-            const current = await db.exercises.toArray();
-            const incoming = pickNewExercises(current, await fetchExercises(missing));
-            if (incoming.length === 0) return;
-            await db.exercises.bulkAdd(incoming);
+            const remote = await fetchExercises(remap ? undefined : missing);
+            if (remote.length === 0) return;
+            await syncCatalog(remote);
             set({ exercises: await db.exercises.toArray() });
+
+            // Recalculado sólo si respondieron todas las fuentes que ya estaban guardadas.
+            const answered = new Set(remote.map(sourceOfExercise));
+            const expected = new Set(stored.map(sourceOfExercise).filter(Boolean));
+            if ([...expected].every((source) => answered.has(source))) markCatalogMappingUpToDate();
           } catch (error) {
-            console.warn('No se pudieron sumar las fuentes nuevas del catálogo', error);
+            console.warn('No se pudo poner al día el catálogo', error);
           }
         })();
       }
@@ -299,9 +351,7 @@ export const useGymStore = create<GymState>((set, get) => ({
         return;
       }
 
-      const incoming = pickNewExercises(await db.exercises.toArray(), remote);
-
-      if (incoming.length > 0) await db.exercises.bulkAdd(incoming);
+      await syncCatalog(remote);
 
       set({ exercises: await db.exercises.toArray(), isLoading: false });
     } catch (error) {

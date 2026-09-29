@@ -59,8 +59,10 @@ const MUSCLE_GROUP_TRANSLATIONS: Record<string, string> = {
 const EQUIPMENT_TRANSLATIONS: Record<string, string> = {
   dumbbell: 'Mancuerna',
   barbell: 'Barra',
+  'e-z curl bar': 'Barra',
   machine: 'Máquina',
   cable: 'Polea',
+  'body only': 'Peso Corporal',
   'body weight': 'Peso Corporal',
   bodyweight: 'Peso Corporal',
   assisted: 'Máquina',
@@ -337,6 +339,12 @@ const wger: ExerciseSource = {
 /* ------------------------------------------------------------------------------------ */
 /* Unión de fuentes                                                                      */
 /* ------------------------------------------------------------------------------------ */
+
+/**
+ * Versión de las tablas de traducción de arriba. Subirla cuando cambie cómo se asigna el
+ * grupo muscular o el equipamiento hace que los ejercicios ya guardados se recalculen.
+ */
+export const CATALOG_MAPPING_VERSION = 2;
 
 /** Orden de prioridad: ante un duplicado se queda el de la fuente que aparece primero. */
 const SOURCES: ExerciseSource[] = [freeExerciseDb, wger];
