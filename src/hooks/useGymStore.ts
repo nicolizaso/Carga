@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import Dexie from 'dexie';
 import { db, openDatabase } from '../lib/db';
-import { fetchExercises } from '../lib/exerciseApi';
+import { fetchExercises, missingSources, pickNewExercises } from '../lib/exerciseApi';
 import { calculateWeekTarget } from '../lib/progression';
 import type {
   Exercise,
@@ -246,15 +246,12 @@ export const useGymStore = create<GymState>((set, get) => ({
         stored = stored.filter((exercise) => !orphanIds.includes(exercise.id as number));
       }
 
-      if (stored.length === 0) {
+      const catalogWasEmpty = stored.length === 0;
+      if (catalogWasEmpty) {
         const remote = await fetchExercises();
 
         if (remote.length > 0) {
-          const unique = new Map<string, Exercise>();
-          for (const exercise of remote) {
-            if (exercise.apiId && !unique.has(exercise.apiId)) unique.set(exercise.apiId, exercise);
-          }
-          await db.exercises.bulkAdd(Array.from(unique.values()));
+          await db.exercises.bulkAdd(remote);
           stored = await db.exercises.toArray();
         }
       }
@@ -270,6 +267,23 @@ export const useGymStore = create<GymState>((set, get) => ({
             ? 'No pudimos descargar el catálogo de ejercicios. Revisá tu conexión o creá los tuyos.'
             : null,
       });
+
+      // Quien ya tenía el catálogo de antes no tiene las fuentes que se sumaron después:
+      // se completan en segundo plano, sin spinner ni error si no responden.
+      const missing = catalogWasEmpty ? [] : missingSources(stored);
+      if (missing.length > 0) {
+        void (async () => {
+          try {
+            const current = await db.exercises.toArray();
+            const incoming = pickNewExercises(current, await fetchExercises(missing));
+            if (incoming.length === 0) return;
+            await db.exercises.bulkAdd(incoming);
+            set({ exercises: await db.exercises.toArray() });
+          } catch (error) {
+            console.warn('No se pudieron sumar las fuentes nuevas del catálogo', error);
+          }
+        })();
+      }
     } catch (error) {
       console.error('Error al inicializar Carga:', error);
       set({ isLoading: false, loadError: 'No se pudo iniciar la base de datos local.' });
@@ -285,9 +299,7 @@ export const useGymStore = create<GymState>((set, get) => ({
         return;
       }
 
-      const stored = await db.exercises.toArray();
-      const knownApiIds = new Set(stored.map((exercise) => exercise.apiId).filter(Boolean));
-      const incoming = remote.filter((exercise) => exercise.apiId && !knownApiIds.has(exercise.apiId));
+      const incoming = pickNewExercises(await db.exercises.toArray(), remote);
 
       if (incoming.length > 0) await db.exercises.bulkAdd(incoming);
 
